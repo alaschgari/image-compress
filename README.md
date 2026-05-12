@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🖼️ Squeeze - High-Performance Image Compressor
 
-## Getting Started
+Squeeze is a modern, privacy-first image compression tool built with Next.js and React. It operates **100% client-side**, meaning your images never touch a server. Designed for developers and creators who need fast, secure, and high-quality image optimization without the overhead of cloud processing.
 
-First, run the development server:
+![Squeeze Preview](public/preview.png)
+
+## 💡 Why Squeeze?
+
+Most online image compressors upload your files to their servers, which can be slow and raises privacy concerns. Squeeze solves this by performing all heavy lifting directly in your browser using Web Workers. This makes it:
+- **Instant**: No upload/download wait times.
+- **Secure**: Your data stays on your machine.
+- **Cost-effective**: Perfect for static deployments on Vercel or Netlify without hitting serverless function limits.
+
+## 🛠️ How it Works
+
+Squeeze uses the `browser-image-compression` library to handle complex image processing tasks. By leveraging the **Canvas API** and **Web Workers**, it can compress large images in the background without freezing the UI. Users can fine-tune the compression quality and maximum resolution to find the perfect balance between file size and visual fidelity.
+
+## ✨ Features
+
+- **Privacy First**: All compression happens locally in your browser. No data is ever uploaded.
+- **Lightning Fast**: Powered by `browser-image-compression` for near-instant results.
+- **Smart Settings**: Adjust quality and maximum resolution with real-time feedback.
+- **Modern UI**: A sleek, premium dark-mode interface with smooth animations and responsive design.
+- **Format Support**: Compresses JPG, PNG, and WebP images seamlessly.
+- **Vercel Ready**: Optimized for deployment on Vercel and edge environments.
+
+## 🚀 Tech Stack
+
+- **Framework**: [Next.js 15 (App Router)](https://nextjs.org/)
+- **Logic**: [React 19](https://react.dev/)
+- **Styling**: [Tailwind CSS 4](https://tailwindcss.com/)
+- **Animations**: [Framer Motion](https://www.framer.com/motion/)
+- **Icons**: [Lucide React](https://lucide.dev/)
+- **Compression**: [browser-image-compression](https://github.com/Donaldcwl/browser-image-compression)
+
+## 🛠️ Getting Started
+
+### Prerequisites
+
+- Node.js 18.17 or later
+- npm / yarn / pnpm
+
+### Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/image-compress.git
+   cd image-compress
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Run the development server:
+   ```bash
+   npm run dev
+   ```
+
+4. Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+## 📦 Deployment
+
+The easiest way to deploy is using [Vercel](https://vercel.com/new):
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npx vercel
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 📄 License
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Built with ❤️ for the performance-obsessed.

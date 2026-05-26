@@ -2,119 +2,179 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import imageCompression from "browser-image-compression";
-import { UploadCloud, Settings, Download, RefreshCw, CheckCircle2, Image as ImageIcon } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+import JSZip from "jszip";
+import { RefreshCw, Download, Plus } from "lucide-react";
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { DropZone } from "./compressor/DropZone";
+import { CompareSlider } from "./compressor/CompareSlider";
+import { SettingsPanel } from "./compressor/SettingsPanel";
+import { BatchList, type BatchItem } from "./compressor/BatchList";
 
-function formatBytes(bytes: number, decimals = 2) {
-  if (!+bytes) return "0 Bytes";
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+interface QueueItem {
+  id: string;
+  file: File;
+  name: string;
+  originalSize: number;
+  compressedFile: File | null;
+  compressedSize: number | null;
+  progress: number;
+  status: "idle" | "compressing" | "completed" | "error";
+  originalUrl: string;
+  compressedUrl: string | null;
 }
 
 export function Compressor() {
-  const [originalFile, setOriginalFile] = useState<File | null>(null);
-  const [compressedFile, setCompressedFile] = useState<File | null>(null);
-  const [originalUrl, setOriginalUrl] = useState<string | null>(null);
-  const [compressedUrl, setCompressedUrl] = useState<string | null>(null);
-  
-  const [isCompressing, setIsCompressing] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-  
-  // Settings
+  const [queue, setQueue] = useState<QueueItem[]>([]);
   const [quality, setQuality] = useState(0.8);
   const [maxWidthOrHeight, setMaxWidthOrHeight] = useState(1920);
+  const [outputFormat, setOutputFormat] = useState<string>("original");
+  const [isDownloadingAll, setIsDownloadingAll] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const compressingIdRef = useRef<string | null>(null);
+  const prevSettingsRef = useRef({ quality, maxWidthOrHeight, outputFormat });
+  const queueRef = useRef<QueueItem[]>([]);
 
-  const compressImage = async (file: File, targetQuality: number, targetSize: number) => {
-    setIsCompressing(true);
-    try {
-      const options = {
-        maxSizeMB: file.size / (1024 * 1024), 
-        maxWidthOrHeight: targetSize,
-        useWebWorker: true,
-        initialQuality: targetQuality,
-        alwaysKeepResolution: true,
-      };
-      
-      const compressed = await imageCompression(file, options);
-      setCompressedFile(compressed);
-      setCompressedUrl(URL.createObjectURL(compressed));
-    } catch (error) {
-      console.error("Compression error:", error);
-    } finally {
-      setIsCompressing(false);
-    }
-  };
-
-  const processFile = async (file: File) => {
-    setOriginalFile(file);
-    const objUrl = URL.createObjectURL(file);
-    setOriginalUrl(objUrl);
-    await compressImage(file, quality, maxWidthOrHeight);
-  };
-
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
-      if (file.type.startsWith("image/")) {
-        processFile(file);
-      }
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      processFile(e.target.files[0]);
-    }
-  };
-
-  // Re-compress when settings change
+  // Update queueRef inside useEffect to satisfy ESLint
   useEffect(() => {
-    if (originalFile) {
-      const timer = setTimeout(() => {
-        compressImage(originalFile, quality, maxWidthOrHeight);
-      }, 500); // Debounce
-      return () => clearTimeout(timer);
-    }
-  }, [quality, maxWidthOrHeight, originalFile]);
+    queueRef.current = queue;
+  }, [queue]);
 
-  const reset = () => {
-    setOriginalFile(null);
-    setCompressedFile(null);
-    if (originalUrl) URL.revokeObjectURL(originalUrl);
-    if (compressedUrl) URL.revokeObjectURL(compressedUrl);
-    setOriginalUrl(null);
-    setCompressedUrl(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  // Cleanup Object URLs on unmount
+  useEffect(() => {
+    return () => {
+      queueRef.current.forEach((item) => {
+        if (item.originalUrl) URL.revokeObjectURL(item.originalUrl);
+        if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
+      });
+    };
+  }, []);
+
+  // Handle files selected from DropZone or File Input
+  const handleFilesSelected = (files: File[]) => {
+    const newItems: QueueItem[] = files.map((file) => ({
+      id: Math.random().toString(36).substring(2, 9),
+      file,
+      name: file.name,
+      originalSize: file.size,
+      compressedFile: null,
+      compressedSize: null,
+      progress: 0,
+      status: "idle",
+      originalUrl: URL.createObjectURL(file),
+      compressedUrl: null,
+    }));
+
+    setQueue((prev) => [...prev, ...newItems]);
   };
 
-  const downloadCompressed = () => {
-    if (compressedUrl && compressedFile) {
+  // Re-trigger compression for the entire queue when settings change
+  useEffect(() => {
+    const prev = prevSettingsRef.current;
+    const settingsChanged =
+      prev.quality !== quality ||
+      prev.maxWidthOrHeight !== maxWidthOrHeight ||
+      prev.outputFormat !== outputFormat;
+
+    if (settingsChanged && queue.length > 0) {
+      setQueue((prevQueue) =>
+        prevQueue.map((item) => {
+          if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
+          return {
+            ...item,
+            status: "idle",
+            progress: 0,
+            compressedFile: null,
+            compressedSize: null,
+            compressedUrl: null,
+          };
+        })
+      );
+      // Reset our active compression lock
+      compressingIdRef.current = null;
+    }
+
+    prevSettingsRef.current = { quality, maxWidthOrHeight, outputFormat };
+  }, [quality, maxWidthOrHeight, outputFormat, queue.length]);
+
+  // Queue Processing Loop (runs sequentially)
+  useEffect(() => {
+    const processQueue = async () => {
+      // Find the next idle item
+      const nextItem = queue.find((item) => item.status === "idle");
+      if (!nextItem || compressingIdRef.current === nextItem.id) return;
+
+      // Lock current processing
+      compressingIdRef.current = nextItem.id;
+
+      // Mark as compressing
+      setQueue((prev) =>
+        prev.map((item) =>
+          item.id === nextItem.id
+            ? { ...item, status: "compressing", progress: 0 }
+            : item
+        )
+      );
+
+      try {
+        const options = {
+          maxSizeMB: nextItem.file.size / (1024 * 1024),
+          maxWidthOrHeight,
+          useWebWorker: true,
+          initialQuality: quality,
+          alwaysKeepResolution: false, // Allows resolution scaling!
+          fileType: outputFormat === "original" ? undefined : outputFormat,
+          onProgress: (percent: number) => {
+            setQueue((prev) =>
+              prev.map((item) =>
+                item.id === nextItem.id ? { ...item, progress: percent } : item
+              )
+            );
+          },
+        };
+
+        const compressed = await imageCompression(nextItem.file, options);
+        const compressedUrl = URL.createObjectURL(compressed);
+
+        setQueue((prev) =>
+          prev.map((item) => {
+            if (item.id === nextItem.id) {
+              if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
+              return {
+                ...item,
+                status: "completed",
+                compressedFile: compressed,
+                compressedSize: compressed.size,
+                compressedUrl,
+                progress: 100,
+              };
+            }
+            return item;
+          })
+        );
+      } catch (error) {
+        console.error("Compression error:", error);
+        setQueue((prev) =>
+          prev.map((item) =>
+            item.id === nextItem.id ? { ...item, status: "error" } : item
+          )
+        );
+      } finally {
+        compressingIdRef.current = null;
+      }
+    };
+
+    processQueue();
+  }, [queue, quality, maxWidthOrHeight, outputFormat]);
+
+  // Download a single item
+  const handleDownload = (id: string) => {
+    const item = queue.find((item) => item.id === id);
+    if (item && item.compressedUrl && item.compressedFile) {
       const link = document.createElement("a");
-      link.href = compressedUrl;
-      const fileName = originalFile?.name.replace(/\.[^/.]+$/, "") + "_compressed.jpg";
+      link.href = item.compressedUrl;
+      const ext = item.compressedFile.type.split("/")[1] || "jpg";
+      const fileName = item.name.replace(/\.[^/.]+$/, "") + `_compressed.${ext}`;
       link.download = fileName;
       document.body.appendChild(link);
       link.click();
@@ -122,177 +182,189 @@ export function Compressor() {
     }
   };
 
+  // Remove individual item from the queue
+  const handleRemove = (id: string) => {
+    const itemToRemove = queue.find((item) => item.id === id);
+    if (itemToRemove) {
+      if (itemToRemove.originalUrl) URL.revokeObjectURL(itemToRemove.originalUrl);
+      if (itemToRemove.compressedUrl) URL.revokeObjectURL(itemToRemove.compressedUrl);
+    }
+    setQueue((prev) => prev.filter((item) => item.id !== id));
+    if (compressingIdRef.current === id) {
+      compressingIdRef.current = null;
+    }
+  };
+
+  // Clear entire queue (reset to DropZone)
+  const handleClearAll = () => {
+    queue.forEach((item) => {
+      if (item.originalUrl) URL.revokeObjectURL(item.originalUrl);
+      if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
+    });
+    setQueue([]);
+    compressingIdRef.current = null;
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  // Batch Download as single ZIP file
+  const handleDownloadAll = async () => {
+    setIsDownloadingAll(true);
+    try {
+      const zip = new JSZip();
+      queue.forEach((item) => {
+        if (item.compressedFile) {
+          const ext = item.compressedFile.type.split("/")[1] || "jpg";
+          const name = item.name.replace(/\.[^/.]+$/, "") + `_compressed.${ext}`;
+          zip.file(name, item.compressedFile);
+        }
+      });
+
+      const content = await zip.generateAsync({ type: "blob" });
+      const zipUrl = URL.createObjectURL(content);
+
+      const link = document.createElement("a");
+      link.href = zipUrl;
+      link.download = "squeezed_images.zip";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(zipUrl);
+    } catch (error) {
+      console.error("ZIP creation failed:", error);
+    } finally {
+      setIsDownloadingAll(false);
+    }
+  };
+
+  // Open file picker in Batch mode to add more images
+  const triggerAddImages = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAddFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const validFiles: File[] = [];
+      for (let i = 0; i < e.target.files.length; i++) {
+        const file = e.target.files[i];
+        if (file.type.startsWith("image/")) {
+          validFiles.push(file);
+        }
+      }
+      if (validFiles.length > 0) {
+        handleFilesSelected(validFiles);
+      }
+    }
+  };
+
+  // Convert queue state to format needed by BatchList
+  const batchListItems: BatchItem[] = queue.map((item) => ({
+    id: item.id,
+    name: item.name,
+    originalSize: item.originalSize,
+    compressedSize: item.compressedSize,
+    progress: item.progress,
+    status: item.status,
+    compressedUrl: item.compressedUrl,
+  }));
+
+  const isCompressingAny = queue.some((item) => item.status === "compressing" || item.status === "idle");
+
   return (
     <div className="w-full flex flex-col gap-6">
-      <AnimatePresence mode="wait">
-        {!originalFile ? (
-          <motion.div
-            key="dropzone"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className={cn(
-              "relative group flex flex-col items-center justify-center w-full h-[400px] border-2 border-dashed rounded-2xl transition-all duration-300 ease-out cursor-pointer overflow-hidden bg-card",
-              isDragging
-                ? "border-primary bg-primary/5"
-                : "border-border hover:border-primary/50 hover:bg-muted/50"
+      {queue.length === 0 ? (
+        <DropZone onFilesSelected={handleFilesSelected} />
+      ) : (
+        <div className="flex flex-col lg:flex-row gap-6 w-full">
+          {/* Hidden input for adding more files in batch mode */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleAddFileInput}
+            accept="image/*"
+            multiple
+            className="hidden"
+          />
+
+          {/* Left Column: Workspaces (Slider or Queue List) */}
+          <div className="flex-1 flex flex-col gap-4">
+            {queue.length === 1 ? (
+              // Single File View with visual split slider comparison
+              <CompareSlider
+                originalUrl={queue[0].originalUrl}
+                compressedUrl={queue[0].compressedUrl || queue[0].originalUrl}
+                originalSize={queue[0].originalSize}
+                compressedSize={queue[0].compressedSize || queue[0].originalSize}
+                isCompressing={queue[0].status === "compressing" || queue[0].status === "idle"}
+              />
+            ) : (
+              // Batch Mode View with queue list and global statistics
+              <BatchList
+                items={batchListItems}
+                onDownload={handleDownload}
+                onRemove={handleRemove}
+                onDownloadAll={handleDownloadAll}
+                isDownloadingAll={isDownloadingAll}
+                onClearAll={handleClearAll}
+              />
             )}
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileInput}
-              accept="image/*"
-              className="hidden"
+          </div>
+
+          {/* Right Column: Settings and Action Buttons */}
+          <div className="w-full lg:w-80 flex flex-col gap-4">
+            <SettingsPanel
+              quality={quality}
+              setQuality={setQuality}
+              maxWidthOrHeight={maxWidthOrHeight}
+              setMaxWidthOrHeight={setMaxWidthOrHeight}
+              outputFormat={outputFormat}
+              setOutputFormat={setOutputFormat}
+              disabled={isDownloadingAll}
             />
-            <div className="flex flex-col items-center justify-center p-6 text-center z-10">
-              <div className="w-16 h-16 mb-4 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
-                <UploadCloud className="w-8 h-8 text-primary" />
-              </div>
-              <p className="mb-2 text-xl font-semibold">Drop your image here</p>
-              <p className="text-sm text-muted-foreground">or click to browse from your computer</p>
-              <p className="text-xs text-muted-foreground mt-6 uppercase tracking-wider font-semibold">Supports JPG, PNG, WEBP</p>
+
+            {/* Global Actions */}
+            <div className="flex flex-col gap-3 mt-auto">
+              {queue.length === 1 ? (
+                <>
+                  <button
+                    onClick={() => handleDownload(queue[0].id)}
+                    disabled={queue[0].status !== "completed" || isCompressingAny}
+                    className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-primary text-primary-foreground font-semibold rounded-xl hover:bg-primary/95 transition-all disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
+                  >
+                    <Download className="w-5 h-5" />
+                    Download
+                  </button>
+                  <button
+                    onClick={handleClearAll}
+                    disabled={isCompressingAny}
+                    className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-muted text-foreground font-medium rounded-xl hover:bg-muted/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
+                  >
+                    <RefreshCw className="w-5 h-5" />
+                    Compress Another
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={triggerAddImages}
+                    disabled={isCompressingAny || isDownloadingAll}
+                    className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-muted text-foreground font-medium rounded-xl hover:bg-muted/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
+                  >
+                    <Plus className="w-5 h-5" />
+                    Add More Images
+                  </button>
+                  <button
+                    onClick={handleClearAll}
+                    disabled={isCompressingAny || isDownloadingAll}
+                    className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-red-500/10 hover:bg-red-500/15 border border-red-500/30 text-red-500 font-semibold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Clear All & Reset
+                  </button>
+                </>
+              )}
             </div>
-            {/* Subtle glow effect behind */}
-            <div className="absolute inset-0 bg-gradient-to-tr from-primary/5 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-          </motion.div>
-        ) : (
-          <motion.div
-            key="editor"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="flex flex-col lg:flex-row gap-6 w-full"
-          >
-            {/* Left Column: Previews */}
-            <div className="flex-1 flex flex-col gap-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Original */}
-                <div className="flex flex-col border border-border rounded-xl bg-card overflow-hidden solid-shadow">
-                  <div className="flex items-center justify-between p-3 border-b border-border bg-muted/30">
-                    <div className="flex items-center gap-2">
-                      <ImageIcon className="w-4 h-4 text-muted-foreground" />
-                      <span className="text-sm font-medium">Original</span>
-                    </div>
-                    <span className="text-sm font-mono bg-background px-2 py-1 rounded-md border border-border">
-                      {formatBytes(originalFile.size)}
-                    </span>
-                  </div>
-                  <div className="relative aspect-square md:aspect-[4/3] bg-muted/10 flex items-center justify-center overflow-hidden">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    {originalUrl && <img src={originalUrl} alt="Original" className="object-contain w-full h-full" />}
-                  </div>
-                </div>
-
-                {/* Compressed */}
-                <div className="flex flex-col border border-border rounded-xl bg-card overflow-hidden solid-shadow">
-                  <div className="flex items-center justify-between p-3 border-b border-border bg-primary/5">
-                    <div className="flex items-center gap-2">
-                      {isCompressing ? (
-                        <RefreshCw className="w-4 h-4 text-primary animate-spin" />
-                      ) : (
-                        <CheckCircle2 className="w-4 h-4 text-green-500" />
-                      )}
-                      <span className="text-sm font-medium">Compressed</span>
-                    </div>
-                    {compressedFile && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-green-500 bg-green-500/10 px-2 py-1 rounded-md">
-                          -{Math.round((1 - compressedFile.size / originalFile.size) * 100)}%
-                        </span>
-                        <span className="text-sm font-mono bg-background px-2 py-1 rounded-md border border-border">
-                          {formatBytes(compressedFile.size)}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  <div className="relative aspect-square md:aspect-[4/3] bg-muted/10 flex items-center justify-center overflow-hidden">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    {compressedUrl && <img src={compressedUrl} alt="Compressed" className="object-contain w-full h-full" />}
-                    {isCompressing && (
-                      <div className="absolute inset-0 bg-background/50 flex items-center justify-center">
-                        <RefreshCw className="w-8 h-8 text-primary animate-spin" />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Right Column: Controls */}
-            <div className="w-full lg:w-80 flex flex-col gap-4">
-              <div className="border border-border rounded-xl bg-card p-5 solid-shadow">
-                <div className="flex items-center gap-2 mb-6 pb-4 border-b border-border">
-                  <Settings className="w-5 h-5 text-primary" />
-                  <h3 className="font-semibold">Compression Settings</h3>
-                </div>
-                
-                <div className="flex flex-col gap-6">
-                  {/* Quality Slider */}
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm font-medium">Quality</label>
-                      <span className="text-sm font-mono">{Math.round(quality * 100)}%</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0.1"
-                      max="1"
-                      step="0.05"
-                      value={quality}
-                      onChange={(e) => setQuality(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-                    />
-                    <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>Smaller File</span>
-                      <span>Better Quality</span>
-                    </div>
-                  </div>
-
-                  {/* Max Resolution Slider */}
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm font-medium">Max Resolution</label>
-                      <span className="text-sm font-mono">{maxWidthOrHeight}px</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="800"
-                      max="3840"
-                      step="100"
-                      value={maxWidthOrHeight}
-                      onChange={(e) => setMaxWidthOrHeight(parseInt(e.target.value))}
-                      className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Actions */}
-              <div className="flex flex-col gap-3 mt-auto">
-                <button
-                  onClick={downloadCompressed}
-                  disabled={!compressedFile || isCompressing}
-                  className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-primary text-primary-foreground font-semibold rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
-                >
-                  <Download className="w-5 h-5" />
-                  Download
-                </button>
-                <button
-                  onClick={reset}
-                  className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-muted text-foreground font-medium rounded-xl hover:bg-muted/80 transition-colors solid-shadow-hover"
-                >
-                  <RefreshCw className="w-5 h-5" />
-                  Compress Another
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

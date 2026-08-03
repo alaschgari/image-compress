@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { MoveHorizontal, Sparkles } from "lucide-react";
-import { formatBytes } from "./utils"; // we will create a utility file or just define it here. Let's define it inside compare slider too, or import.
+import { MoveHorizontal, Sparkles, XCircle } from "lucide-react";
+import { formatBytes } from "./utils";
 
 interface CompareSliderProps {
   originalUrl: string;
@@ -10,6 +10,7 @@ interface CompareSliderProps {
   originalSize: number;
   compressedSize: number;
   isCompressing: boolean;
+  onCancel?: () => void;
 }
 
 export function CompareSlider({
@@ -18,6 +19,7 @@ export function CompareSlider({
   originalSize,
   compressedSize,
   isCompressing,
+  onCancel,
 }: CompareSliderProps) {
   const [sliderPosition, setSliderPosition] = useState(50); // percentage (0 - 100)
   const [isDragging, setIsDragging] = useState(false);
@@ -59,6 +61,7 @@ export function CompareSlider({
   const handleTouchMove = (e: React.TouchEvent) => {
     if (!isDragging) return;
     if (e.touches.length > 0) {
+      e.preventDefault();
       handleMove(e.touches[0].clientX);
     }
   };
@@ -145,7 +148,16 @@ export function CompareSlider({
         {isCompressing && (
           <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex flex-col items-center justify-center z-30">
             <div className="w-12 h-12 rounded-full border-4 border-primary border-t-transparent animate-spin mb-3" />
-            <p className="text-sm font-medium text-foreground">Compressing image...</p>
+            <p className="text-sm font-medium text-foreground mb-3">Compressing image...</p>
+            {onCancel && (
+              <button
+                onClick={onCancel}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-muted text-foreground text-xs font-semibold rounded-lg hover:bg-muted/80 transition-colors"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                Cancel
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -19,19 +19,22 @@ Squeeze uses the `browser-image-compression` library to handle complex image pro
 
 - **Privacy First**: All compression happens locally in your browser. No data is ever uploaded.
 - **Lightning Fast**: Powered by `browser-image-compression` for near-instant results.
-- **Smart Settings**: Adjust quality and maximum resolution with real-time feedback.
-- **Modern UI**: A sleek, premium dark-mode interface with smooth animations and responsive design.
-- **Format Support**: Compresses JPG, PNG, and WebP images seamlessly.
+- **Batch Processing**: Drop in up to 50 images (max 50MB each) and compress them sequentially with a live progress queue.
+- **Smart Settings**: Adjust quality, maximum resolution, and output format with real-time feedback — your preferences are remembered across sessions.
+- **Cancel & Retry**: Stop an in-flight compression at any time, or retry a failed/cancelled item without re-uploading.
+- **Batch ZIP Download**: Download all compressed images at once as a single ZIP archive.
+- **Modern UI**: A sleek, premium dark-mode interface with a before/after compare slider and responsive design.
+- **Format Support**: Compresses and converts between JPG, PNG, and WebP images seamlessly.
 - **Vercel Ready**: Optimized for deployment on Vercel and edge environments.
 
 ## 🚀 Tech Stack
 
-- **Framework**: [Next.js 15 (App Router)](https://nextjs.org/)
+- **Framework**: [Next.js 16 (App Router)](https://nextjs.org/)
 - **Logic**: [React 19](https://react.dev/)
 - **Styling**: [Tailwind CSS 4](https://tailwindcss.com/)
-- **Animations**: [Framer Motion](https://www.framer.com/motion/)
 - **Icons**: [Lucide React](https://lucide.dev/)
 - **Compression**: [browser-image-compression](https://github.com/Donaldcwl/browser-image-compression)
+- **Archiving**: [JSZip](https://stuk.github.io/jszip/)
 
 ## 🛠️ Getting Started
 

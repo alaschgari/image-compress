@@ -1,7 +1,19 @@
 "use client";
 
 import React from "react";
-import { Download, X, CheckCircle2, AlertCircle, RefreshCw, Trash2, ArrowDownToLine, Zap } from "lucide-react";
+import {
+  Download,
+  X,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+  Trash2,
+  ArrowDownToLine,
+  Zap,
+  XCircle,
+  RotateCcw,
+  Ban,
+} from "lucide-react";
 import { formatBytes } from "./utils";
 
 export interface BatchItem {
@@ -10,7 +22,8 @@ export interface BatchItem {
   originalSize: number;
   compressedSize: number | null;
   progress: number;
-  status: "idle" | "compressing" | "completed" | "error";
+  status: "idle" | "compressing" | "completed" | "error" | "cancelled";
+  errorMessage?: string | null;
   compressedUrl: string | null;
 }
 
@@ -21,6 +34,8 @@ interface BatchListProps {
   onDownloadAll: () => void;
   isDownloadingAll: boolean;
   onClearAll: () => void;
+  onCancel: (id: string) => void;
+  onRetry: (id: string) => void;
 }
 
 export function BatchList({
@@ -30,13 +45,15 @@ export function BatchList({
   onDownloadAll,
   isDownloadingAll,
   onClearAll,
+  onCancel,
+  onRetry,
 }: BatchListProps) {
   // Statistics calculations
   const totalOriginal = items.reduce((sum, item) => sum + item.originalSize, 0);
   const totalCompressed = items.reduce((sum, item) => sum + (item.compressedSize || item.originalSize), 0);
   const totalSaved = Math.max(0, totalOriginal - totalCompressed);
   const totalSavingsPct = totalOriginal > 0 ? Math.round((totalSaved / totalOriginal) * 100) : 0;
-  
+
   const completedCount = items.filter(item => item.status === "completed").length;
   const isAllCompleted = completedCount === items.length && items.length > 0;
   const isAnyProcessing = items.some(item => item.status === "compressing");
@@ -104,8 +121,8 @@ export function BatchList({
       {/* Queue List */}
       <div className="border border-border rounded-xl bg-card overflow-hidden divide-y divide-border max-h-[380px] overflow-y-auto custom-scrollbar solid-shadow">
         {items.map((item) => {
-          const savingsPct = item.compressedSize && item.originalSize > 0 
-            ? Math.round((1 - item.compressedSize / item.originalSize) * 100) 
+          const savingsPct = item.compressedSize && item.originalSize > 0
+            ? Math.round((1 - item.compressedSize / item.originalSize) * 100)
             : 0;
 
           return (
@@ -115,13 +132,13 @@ export function BatchList({
                 <span className="text-sm font-medium text-foreground truncate" title={item.name}>
                   {item.name}
                 </span>
-                
+
                 {/* Progress bar or stats */}
                 <div className="mt-2 flex items-center gap-3">
                   {item.status === "compressing" ? (
                     <div className="flex-1 flex items-center gap-2">
                       <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className="h-full bg-primary transition-all duration-300"
                           style={{ width: `${item.progress}%` }}
                         />
@@ -140,9 +157,17 @@ export function BatchList({
                       </span>
                     </div>
                   ) : item.status === "error" ? (
-                    <span className="text-xs text-red-500 flex items-center gap-1">
+                    <span
+                      className="text-xs text-red-500 flex items-center gap-1"
+                      title={item.errorMessage || "Compression failed"}
+                    >
                       <AlertCircle className="w-3.5 h-3.5" />
-                      Compression failed
+                      {item.errorMessage || "Compression failed"}
+                    </span>
+                  ) : item.status === "cancelled" ? (
+                    <span className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Ban className="w-3.5 h-3.5" />
+                      Cancelled
                     </span>
                   ) : (
                     <span className="text-xs text-muted-foreground">Queued</span>
@@ -170,6 +195,24 @@ export function BatchList({
 
                 {/* Actions */}
                 <div className="flex items-center gap-1.5">
+                  {item.status === "compressing" && (
+                    <button
+                      onClick={() => onCancel(item.id)}
+                      className="p-2 text-muted-foreground hover:text-amber-500 hover:bg-amber-500/10 rounded-lg transition-all"
+                      title="Cancel compression"
+                    >
+                      <XCircle className="w-4 h-4" />
+                    </button>
+                  )}
+                  {(item.status === "error" || item.status === "cancelled") && (
+                    <button
+                      onClick={() => onRetry(item.id)}
+                      className="p-2 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-lg transition-all"
+                      title="Retry compression"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                  )}
                   <button
                     onClick={() => onDownload(item.id)}
                     disabled={item.status !== "completed"}

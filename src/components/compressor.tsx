@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import imageCompression from "browser-image-compression";
 import JSZip from "jszip";
 import { RefreshCw, Download, Plus } from "lucide-react";
@@ -9,6 +9,14 @@ import { DropZone } from "./compressor/DropZone";
 import { CompareSlider } from "./compressor/CompareSlider";
 import { SettingsPanel } from "./compressor/SettingsPanel";
 import { BatchList, type BatchItem } from "./compressor/BatchList";
+import {
+  getCompressedFileName,
+  MAX_FILE_SIZE_BYTES,
+  MAX_BATCH_FILES,
+  loadSettings,
+  saveSettings,
+  isAbortError,
+} from "./compressor/utils";
 
 interface QueueItem {
   id: string;
@@ -18,24 +26,33 @@ interface QueueItem {
   compressedFile: File | null;
   compressedSize: number | null;
   progress: number;
-  status: "idle" | "compressing" | "completed" | "error";
+  status: "idle" | "compressing" | "completed" | "error" | "cancelled";
+  errorMessage: string | null;
   originalUrl: string;
   compressedUrl: string | null;
 }
 
 export function Compressor() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [quality, setQuality] = useState(0.8);
-  const [maxWidthOrHeight, setMaxWidthOrHeight] = useState(1920);
-  const [outputFormat, setOutputFormat] = useState<string>("original");
+  const [quality, setQuality] = useState(() => loadSettings().quality);
+  const [maxWidthOrHeight, setMaxWidthOrHeight] = useState(() => loadSettings().maxWidthOrHeight);
+  const [outputFormat, setOutputFormat] = useState<string>(() => loadSettings().outputFormat);
   const [isDownloadingAll, setIsDownloadingAll] = useState(false);
+  const [rejectionNotice, setRejectionNotice] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const compressingIdRef = useRef<string | null>(null);
-  const prevSettingsRef = useRef({ quality, maxWidthOrHeight, outputFormat });
   const queueRef = useRef<QueueItem[]>([]);
+  // Bumped whenever settings change; in-flight compressions check this before
+  // committing their result so stale (pre-settings-change) results are discarded.
+  const settingsGenerationRef = useRef(0);
+  const activeCompressionsRef = useRef<Set<string>>(new Set());
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
 
-  // Update queueRef inside useEffect to satisfy ESLint
+  // Persist settings whenever they change.
+  useEffect(() => {
+    saveSettings({ quality, maxWidthOrHeight, outputFormat });
+  }, [quality, maxWidthOrHeight, outputFormat]);
+
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
@@ -52,8 +69,31 @@ export function Compressor() {
 
   // Handle files selected from DropZone or File Input
   const handleFilesSelected = (files: File[]) => {
-    const newItems: QueueItem[] = files.map((file) => ({
-      id: Math.random().toString(36).substring(2, 9),
+    const currentCount = queueRef.current.length;
+    const availableSlots = Math.max(0, MAX_BATCH_FILES - currentCount);
+
+    const tooLarge = files.filter((f) => f.size > MAX_FILE_SIZE_BYTES);
+    const withinSize = files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES);
+    const accepted = withinSize.slice(0, availableSlots);
+    const droppedForLimit = withinSize.length - accepted.length;
+
+    if (tooLarge.length > 0 || droppedForLimit > 0) {
+      const parts: string[] = [];
+      if (tooLarge.length > 0) {
+        parts.push(`${tooLarge.length} file(s) exceed the 50MB limit`);
+      }
+      if (droppedForLimit > 0) {
+        parts.push(`${droppedForLimit} file(s) skipped (max ${MAX_BATCH_FILES} per batch)`);
+      }
+      setRejectionNotice(parts.join(" · "));
+    } else {
+      setRejectionNotice(null);
+    }
+
+    if (accepted.length === 0) return;
+
+    const newItems: QueueItem[] = accepted.map((file) => ({
+      id: crypto.randomUUID(),
       file,
       name: file.name,
       originalSize: file.size,
@@ -61,6 +101,7 @@ export function Compressor() {
       compressedSize: null,
       progress: 0,
       status: "idle",
+      errorMessage: null,
       originalUrl: URL.createObjectURL(file),
       compressedUrl: null,
     }));
@@ -69,6 +110,7 @@ export function Compressor() {
   };
 
   // Re-trigger compression for the entire queue when settings change
+  const prevSettingsRef = useRef({ quality, maxWidthOrHeight, outputFormat });
   useEffect(() => {
     const prev = prevSettingsRef.current;
     const settingsChanged =
@@ -76,72 +118,68 @@ export function Compressor() {
       prev.maxWidthOrHeight !== maxWidthOrHeight ||
       prev.outputFormat !== outputFormat;
 
-    if (settingsChanged && queue.length > 0) {
+    if (settingsChanged) {
+      // Invalidate any in-flight compressions from before this change.
+      settingsGenerationRef.current += 1;
+
       setQueue((prevQueue) =>
         prevQueue.map((item) => {
           if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
           return {
             ...item,
-            status: "idle",
+            status: "idle" as const,
             progress: 0,
             compressedFile: null,
             compressedSize: null,
             compressedUrl: null,
+            errorMessage: null,
           };
         })
       );
-      // Reset our active compression lock
-      compressingIdRef.current = null;
     }
 
     prevSettingsRef.current = { quality, maxWidthOrHeight, outputFormat };
-  }, [quality, maxWidthOrHeight, outputFormat, queue.length]);
+  }, [quality, maxWidthOrHeight, outputFormat]);
 
-  // Queue Processing Loop (runs sequentially)
-  useEffect(() => {
-    const processQueue = async () => {
-      // Find the next idle item
-      const nextItem = queue.find((item) => item.status === "idle");
-      if (!nextItem || compressingIdRef.current === nextItem.id) return;
+  // Process a single queue item
+  const processItem = useCallback(
+    async (item: QueueItem, generation: number) => {
+      activeCompressionsRef.current.add(item.id);
+      const controller = new AbortController();
+      abortControllersRef.current.set(item.id, controller);
 
-      // Lock current processing
-      compressingIdRef.current = nextItem.id;
-
-      // Mark as compressing
       setQueue((prev) =>
-        prev.map((item) =>
-          item.id === nextItem.id
-            ? { ...item, status: "compressing", progress: 0 }
-            : item
-        )
+        prev.map((q) => (q.id === item.id ? { ...q, status: "compressing", progress: 0 } : q))
       );
 
       try {
         const options = {
-          maxSizeMB: nextItem.file.size / (1024 * 1024),
           maxWidthOrHeight,
           useWebWorker: true,
           initialQuality: quality,
-          alwaysKeepResolution: false, // Allows resolution scaling!
+          alwaysKeepResolution: false,
           fileType: outputFormat === "original" ? undefined : outputFormat,
+          signal: controller.signal,
           onProgress: (percent: number) => {
+            if (settingsGenerationRef.current !== generation) return;
             setQueue((prev) =>
-              prev.map((item) =>
-                item.id === nextItem.id ? { ...item, progress: percent } : item
-              )
+              prev.map((q) => (q.id === item.id ? { ...q, progress: percent } : q))
             );
           },
         };
 
-        const compressed = await imageCompression(nextItem.file, options);
-        const compressedUrl = URL.createObjectURL(compressed);
+        const compressed = await imageCompression(item.file, options);
 
+        // Settings changed while this was compressing — discard the stale result.
+        if (settingsGenerationRef.current !== generation) return;
+
+        const compressedUrl = URL.createObjectURL(compressed);
         setQueue((prev) =>
-          prev.map((item) => {
-            if (item.id === nextItem.id) {
-              if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
+          prev.map((q) => {
+            if (q.id === item.id) {
+              if (q.compressedUrl) URL.revokeObjectURL(q.compressedUrl);
               return {
-                ...item,
+                ...q,
                 status: "completed",
                 compressedFile: compressed,
                 compressedSize: compressed.size,
@@ -149,23 +187,53 @@ export function Compressor() {
                 progress: 100,
               };
             }
-            return item;
+            return q;
           })
         );
       } catch (error) {
+        if (settingsGenerationRef.current !== generation) return;
+        if (isAbortError(error)) {
+          setQueue((prev) =>
+            prev.map((q) =>
+              q.id === item.id ? { ...q, status: "cancelled", progress: 0, errorMessage: null } : q
+            )
+          );
+          return;
+        }
         console.error("Compression error:", error);
+        const message = error instanceof Error ? error.message : "Unknown error";
         setQueue((prev) =>
-          prev.map((item) =>
-            item.id === nextItem.id ? { ...item, status: "error" } : item
-          )
+          prev.map((q) => (q.id === item.id ? { ...q, status: "error", errorMessage: message } : q))
         );
       } finally {
-        compressingIdRef.current = null;
+        activeCompressionsRef.current.delete(item.id);
+        abortControllersRef.current.delete(item.id);
       }
-    };
+    },
+    [maxWidthOrHeight, quality, outputFormat]
+  );
 
-    processQueue();
-  }, [queue, quality, maxWidthOrHeight, outputFormat]);
+  // Cancel an in-flight compression
+  const handleCancel = (id: string) => {
+    abortControllersRef.current.get(id)?.abort();
+  };
+
+  // Retry a failed or cancelled item
+  const handleRetry = (id: string) => {
+    setQueue((prev) =>
+      prev.map((q) =>
+        q.id === id ? { ...q, status: "idle", progress: 0, errorMessage: null } : q
+      )
+    );
+  };
+
+  // Kick off compression for idle items sequentially (one at a time)
+  useEffect(() => {
+    if (activeCompressionsRef.current.size > 0) return;
+    const nextItem = queue.find((item) => item.status === "idle");
+    if (!nextItem) return;
+    processItem(nextItem, settingsGenerationRef.current);
+  }, [queue, processItem]);
 
   // Download a single item
   const handleDownload = (id: string) => {
@@ -173,9 +241,7 @@ export function Compressor() {
     if (item && item.compressedUrl && item.compressedFile) {
       const link = document.createElement("a");
       link.href = item.compressedUrl;
-      const ext = item.compressedFile.type.split("/")[1] || "jpg";
-      const fileName = item.name.replace(/\.[^/.]+$/, "") + `_compressed.${ext}`;
-      link.download = fileName;
+      link.download = getCompressedFileName(item.name, item.compressedFile.type);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -189,10 +255,10 @@ export function Compressor() {
       if (itemToRemove.originalUrl) URL.revokeObjectURL(itemToRemove.originalUrl);
       if (itemToRemove.compressedUrl) URL.revokeObjectURL(itemToRemove.compressedUrl);
     }
+    abortControllersRef.current.get(id)?.abort();
+    abortControllersRef.current.delete(id);
     setQueue((prev) => prev.filter((item) => item.id !== id));
-    if (compressingIdRef.current === id) {
-      compressingIdRef.current = null;
-    }
+    activeCompressionsRef.current.delete(id);
   };
 
   // Clear entire queue (reset to DropZone)
@@ -201,8 +267,12 @@ export function Compressor() {
       if (item.originalUrl) URL.revokeObjectURL(item.originalUrl);
       if (item.compressedUrl) URL.revokeObjectURL(item.compressedUrl);
     });
+    abortControllersRef.current.forEach((controller) => controller.abort());
+    abortControllersRef.current.clear();
     setQueue([]);
-    compressingIdRef.current = null;
+    activeCompressionsRef.current.clear();
+    settingsGenerationRef.current += 1;
+    setRejectionNotice(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -213,8 +283,7 @@ export function Compressor() {
       const zip = new JSZip();
       queue.forEach((item) => {
         if (item.compressedFile) {
-          const ext = item.compressedFile.type.split("/")[1] || "jpg";
-          const name = item.name.replace(/\.[^/.]+$/, "") + `_compressed.${ext}`;
+          const name = getCompressedFileName(item.name, item.compressedFile.type);
           zip.file(name, item.compressedFile);
         }
       });
@@ -264,13 +333,19 @@ export function Compressor() {
     compressedSize: item.compressedSize,
     progress: item.progress,
     status: item.status,
+    errorMessage: item.errorMessage,
     compressedUrl: item.compressedUrl,
   }));
 
-  const isCompressingAny = queue.some((item) => item.status === "compressing" || item.status === "idle");
+  const isQueueActive = queue.some((item) => item.status === "compressing" || item.status === "idle");
 
   return (
     <div className="w-full flex flex-col gap-6">
+      {rejectionNotice && (
+        <div className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-500">
+          {rejectionNotice}
+        </div>
+      )}
       {queue.length === 0 ? (
         <DropZone onFilesSelected={handleFilesSelected} />
       ) : (
@@ -295,6 +370,7 @@ export function Compressor() {
                 originalSize={queue[0].originalSize}
                 compressedSize={queue[0].compressedSize || queue[0].originalSize}
                 isCompressing={queue[0].status === "compressing" || queue[0].status === "idle"}
+                onCancel={() => handleCancel(queue[0].id)}
               />
             ) : (
               // Batch Mode View with queue list and global statistics
@@ -305,6 +381,8 @@ export function Compressor() {
                 onDownloadAll={handleDownloadAll}
                 isDownloadingAll={isDownloadingAll}
                 onClearAll={handleClearAll}
+                onCancel={handleCancel}
+                onRetry={handleRetry}
               />
             )}
           </div>
@@ -327,7 +405,7 @@ export function Compressor() {
                 <>
                   <button
                     onClick={() => handleDownload(queue[0].id)}
-                    disabled={queue[0].status !== "completed" || isCompressingAny}
+                    disabled={queue[0].status !== "completed" || isQueueActive}
                     className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-primary text-primary-foreground font-semibold rounded-xl hover:bg-primary/95 transition-all disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
                   >
                     <Download className="w-5 h-5" />
@@ -335,7 +413,7 @@ export function Compressor() {
                   </button>
                   <button
                     onClick={handleClearAll}
-                    disabled={isCompressingAny}
+                    disabled={isQueueActive}
                     className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-muted text-foreground font-medium rounded-xl hover:bg-muted/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
                   >
                     <RefreshCw className="w-5 h-5" />
@@ -346,7 +424,7 @@ export function Compressor() {
                 <>
                   <button
                     onClick={triggerAddImages}
-                    disabled={isCompressingAny || isDownloadingAll}
+                    disabled={isQueueActive || isDownloadingAll}
                     className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-muted text-foreground font-medium rounded-xl hover:bg-muted/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed solid-shadow-hover"
                   >
                     <Plus className="w-5 h-5" />
@@ -354,7 +432,7 @@ export function Compressor() {
                   </button>
                   <button
                     onClick={handleClearAll}
-                    disabled={isCompressingAny || isDownloadingAll}
+                    disabled={isQueueActive || isDownloadingAll}
                     className="flex items-center justify-center gap-2 w-full py-3 px-4 bg-red-500/10 hover:bg-red-500/15 border border-red-500/30 text-red-500 font-semibold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Clear All & Reset
